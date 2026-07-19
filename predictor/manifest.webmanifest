@@ -1,1 +1,1 @@
-{"name":"競馬予測","short_name":"競馬予測","id":"./","start_url":"./?source=homescreen","scope":"./","display":"standalone","background_color":"#091016","theme_color":"#101923","icons":[{"src":"./icon-512.png","sizes":"512x512","type":"image/png","purpose":"any maskable"}]}
+{"name":"予想作成","short_name":"予想作成","id":"./","start_url":"./?source=homescreen","scope":"./","display":"standalone","background_color":"#091016","theme_color":"#101923","icons":[{"src":"./icon-512.png","sizes":"512x512","type":"image/png","purpose":"any maskable"}]}
