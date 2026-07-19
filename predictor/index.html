@@ -3,18 +3,125 @@
 *{box-sizing:border-box}html,body{margin:0;min-height:100%;background:#091016}body{min-height:100svh;display:grid;place-items:center;padding:calc(22px + env(safe-area-inset-top)) 22px calc(22px + env(safe-area-inset-bottom));font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans",sans-serif;color:#f7f1e7;background:radial-gradient(circle at 14% 0,rgba(60,91,111,.9) 0,transparent 40%),radial-gradient(circle at 90% 90%,rgba(174,130,48,.16) 0,transparent 38%),linear-gradient(150deg,#101923,#091016 72%)}.card{width:min(100%,390px);padding:28px 22px 24px;border:1px solid rgba(255,255,255,.1);border-radius:25px;background:rgba(15,25,34,.92);box-shadow:0 28px 70px rgba(0,0,0,.38);text-align:center}.title{margin:0;font-size:29px}.sub{margin:12px auto 0;max-width:290px;color:#aeb9c2;font-size:14px;line-height:1.75}.state{display:flex;align-items:center;justify-content:center;gap:10px;margin-top:27px;padding:14px;border:1px solid #2d3d49;border-radius:15px;background:#0b131a;color:#c7d0d6;font-size:13px}.spinner{width:18px;height:18px;border:2px solid #384956;border-top-color:#d5b871;border-radius:50%;animation:spin .9s linear infinite}.state.ready .spinner{border:0;background:#55cf91;animation:none}.hint{margin:16px 0 0;color:#687984;font-size:11px;line-height:1.65}@keyframes spin{to{transform:rotate(1turn)}}
 </style></head><body><main class="card"><h1 class="title">予想作成</h1><p class="sub">Mac上の作成画面へ接続しています。</p><div id="state" class="state"><span class="spinner"></span><span id="stateText">接続先を確認中</span></div><p class="hint">Macの起動直後は接続まで少し時間がかかります。<br>この画面のまま自動で再接続します。</p></main><script>
 /*
- * === Predictor固定ランチャー自動接続処理 ===
  * 目的:
- * NOTE更新と共有するendpoint.jsonから現在のQuick Tunnelを取得し、同じトンネルの`/predictor`へ自動接続する。
+ * iPhoneのホーム画面に登録済みの固定ランチャーから、URLが変わらないCloudflare Worker版予想作成へ接続する。
  * 引数:
- * なし。親ディレクトリのendpoint.jsonとブラウザの表示・オンライン状態を使用する。
+ * なし。ブラウザの表示状態、オンライン状態、固定WorkerのPredictor health APIを使用する。
  * 戻り値:
- * なし。接続確認後に現在のブラウザ画面を公開中の予想作成画面へ置き換える。
+ * なし。health確認後に現在の画面を固定Worker版予想作成へ置き換える。
  * エラー時の動作:
- * endpoint取得、URL検証、Predictor health確認の失敗時は3秒後に再試行し、無効URLへ遷移しない。
+ * Mac停止中、ネット切断中、health確認失敗時は無効な画面へ遷移せず、3秒後に自動再試行する。
  * 補足:
- * 親ディレクトリのendpoint.jsonはNOTEトンネル監督だけが更新し、PINや予測データを含まない。
- * pageshow、オンライン復帰、画面再表示でも確認し、バックグラウンド中は通信しない。
+ * 一時的なtrycloudflare URLはブラウザへ渡さない。pageshow、オンライン復帰、画面再表示でも接続確認する。
  */
-(()=>{const endpoint='../endpoint.json';const pattern=/^https:\/\/[a-z0-9-]+\.trycloudflare\.com$/;const state=document.getElementById('state');const text=document.getElementById('stateText');let timer=0;let connecting=false;function show(message,ready=false){text.textContent=message;state.classList.toggle('ready',ready)}async function timedFetch(url){const controller=new AbortController();const timeout=setTimeout(()=>controller.abort(),6000);try{return await fetch(url,{cache:'no-store',signal:controller.signal})}finally{clearTimeout(timeout)}}function retry(message){show(message);clearTimeout(timer);timer=setTimeout(connect,3000)}async function connect(){if(connecting||document.visibilityState==='hidden')return;connecting=true;clearTimeout(timer);show('接続先を確認中');try{const endpointResponse=await timedFetch(`${endpoint}?t=${Date.now()}`);if(!endpointResponse.ok)throw new Error('endpoint');const payload=await endpointResponse.json();const tunnel=String(payload.url||'').replace(/\/$/,'');if(!pattern.test(tunnel))throw new Error('url');show('Macへ接続中');const health=await timedFetch(`${tunnel}/predictor/health?t=${Date.now()}`);if(!health.ok)throw new Error('health');show('接続しました',true);window.location.replace(`${tunnel}/predictor/?source=launcher&t=${Date.now()}`)}catch(_error){retry(navigator.onLine?'Macの起動を待っています':'ネット接続を待っています')}finally{connecting=false}}document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible')connect()});window.addEventListener('pageshow',connect);window.addEventListener('online',connect);connect()})();
+(() => {
+  const stablePredictorUrl = "https://keiba-mobile-control.marble-pickup-dca.workers.dev/predictor/";
+  const stateElement = document.getElementById("state");
+  const stateTextElement = document.getElementById("stateText");
+  let retryTimer = null;
+  let connectActive = false;
+
+  /*
+   * 目的:
+   * 接続状態の文言と成功表示を一箇所で更新する。
+   * 引数:
+   * messageは表示文言、readyは接続完了表示の有無。
+   * 戻り値:
+   * なし。
+   * エラー時の動作:
+   * 対象要素が初期HTMLに存在する前提のため、欠損時はブラウザ標準例外を返す。
+   * 補足:
+   * readyがtrueの場合だけスピナーを完了表示へ切り替える。
+   */
+  const showState = (message, ready = false) => {
+    stateTextElement.textContent = message;
+    stateElement.classList.toggle("ready", ready);
+  };
+
+  /*
+   * 目的:
+   * health確認が応答しない場合に、6秒で通信を中断して再試行へ移行する。
+   * 引数:
+   * urlは確認先URL。
+   * 戻り値:
+   * fetchのResponseをPromiseで返す。
+   * エラー時の動作:
+   * タイムアウト時はAbortError、通信失敗時はfetch由来の例外を呼び出し元へ返す。
+   * 補足:
+   * キャッシュとCookieを使用せず、完了時は必ずタイマーを解除する。
+   */
+  const fetchWithTimeout = async (url) => {
+    const controller = new AbortController();
+    const timeoutId = window.setTimeout(() => controller.abort(), 6000);
+    try {
+      return await fetch(url, {
+        cache: "no-store",
+        credentials: "omit",
+        mode: "cors",
+        signal: controller.signal,
+      });
+    } finally {
+      window.clearTimeout(timeoutId);
+    }
+  };
+
+  /*
+   * 目的:
+   * 接続失敗後の自動再試行を1件だけ予約する。
+   * 引数:
+   * messageは待機中に表示する文言。
+   * 戻り値:
+   * なし。
+   * エラー時の動作:
+   * 例外は発生させず、既存タイマーを解除してから再予約する。
+   * 補足:
+   * 3秒後にconnectを呼び出す。
+   */
+  const scheduleRetry = (message) => {
+    showState(message);
+    if (retryTimer) window.clearTimeout(retryTimer);
+    retryTimer = window.setTimeout(connect, 3000);
+  };
+
+  /*
+   * 目的:
+   * 固定Workerの稼働を確認し、予想作成画面へ安全に遷移する。
+   * 引数:
+   * なし。
+   * 戻り値:
+   * Promise<void>。遷移成功時は現在の履歴を置き換える。
+   * エラー時の動作:
+   * 利用者向け待機表示へ切り替え、3秒後の自動再試行を予約する。
+   * 補足:
+   * 非表示中および多重実行中は処理しない。成功するまで固定GitHub Pages上に留まる。
+   */
+  const connect = async () => {
+    if (connectActive || document.visibilityState === "hidden") return;
+    connectActive = true;
+    if (retryTimer) window.clearTimeout(retryTimer);
+    retryTimer = null;
+    showState("Macへ接続中");
+    try {
+      const healthUrl = new URL("health", stablePredictorUrl);
+      healthUrl.searchParams.set("t", String(Date.now()));
+      const healthResponse = await fetchWithTimeout(healthUrl.toString());
+      if (!healthResponse.ok) throw new Error(`health HTTP ${healthResponse.status}`);
+      showState("接続しました", true);
+      window.location.replace(`${stablePredictorUrl}?source=launcher`);
+    } catch (_error) {
+      scheduleRetry(
+        navigator.onLine ? "Macの起動を待っています" : "ネット接続を待っています",
+      );
+    } finally {
+      connectActive = false;
+    }
+  };
+
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") connect();
+  });
+  window.addEventListener("pageshow", connect);
+  window.addEventListener("online", connect);
+  connect();
+})();
 </script></body></html>
