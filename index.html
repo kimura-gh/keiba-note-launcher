@@ -4,13 +4,85 @@
 <meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-title" content="NOTE更新">
 <meta name="theme-color" content="#0b0c0f"><link rel="manifest" href="manifest.webmanifest">
 <title>NOTE更新</title>
-<style>body{margin:0;background:#0b0c0f;color:#fff;font-family:-apple-system,sans-serif;display:grid;place-items:center;min-height:100vh}main{text-align:center;padding:24px}button{border:0;border-radius:14px;background:#4f8cff;color:#fff;font-size:18px;font-weight:700;padding:14px 28px}.error{color:#ff7a84}</style>
+<style>body{margin:0;background:#0b0c0f;color:#fff;font-family:-apple-system,sans-serif;display:grid;place-items:center;min-height:100vh}main{text-align:center;padding:24px}button{border:0;border-radius:14px;background:#4f8cff;color:#fff;font-size:18px;font-weight:700;padding:14px 28px}.waiting{color:#9ba7ba}.error{color:#ff7a84}</style>
 </head><body><main><h1>NOTE更新</h1><p id="status">Macへ接続しています…</p><button id="retry" hidden>再試行</button></main>
 <script>
-const statusElement=document.getElementById('status');const retryButton=document.getElementById('retry');
-async function connect(){retryButton.hidden=true;statusElement.className='';statusElement.textContent='Macへ接続しています…';
-try{const response=await fetch('./endpoint.json?t='+Date.now(),{cache:'no-store'});if(!response.ok)throw new Error('endpoint');
-const data=await response.json();if(!/^https:\/\/[a-z0-9-]+\.trycloudflare\.com$/.test(data.url||''))throw new Error('url');
-location.replace(data.url+'/');}catch(error){statusElement.className='error';statusElement.textContent='接続先を取得できません';retryButton.hidden=false;}}
-retryButton.addEventListener('click',connect);connect();
+(() => {
+  /*
+   * === Quick Tunnel接続先解決・自動再試行ブロック ===
+   * 目的:
+   * iPhoneにはこのGitHub Pages固定URLだけを保持させ、Mac再起動ごとに変わるtrycloudflare URLをendpoint.jsonから自動取得する。
+   * 失敗時の挙動:
+   * Mac起動直後・DNS反映待ち・GitHub Pages更新待ちでは画面をエラー終了させず、3秒後に自動再試行する。
+   * 前提条件:
+   * endpoint.jsonはトンネル監督処理が更新し、アプリのhealth APIはこのGitHub Pages originにだけCORSを許可すること。
+   * 副作用:
+   * endpoint.jsonとアプリhealth APIを読み取り、正常応答後だけ新しいトンネルURLへ画面遷移する。
+   */
+  const statusElement = document.getElementById("status");
+  const retryButton = document.getElementById("retry");
+  const endpointPattern = /^https:\/\/[a-z0-9-]+\.trycloudflare\.com$/;
+  let retryTimer = null;
+  let connectActive = false;
+
+  const fetchWithTimeout = async (url, options, timeoutMs) => {
+    const controller = new AbortController();
+    const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      return await fetch(url, {...options, signal: controller.signal});
+    } finally {
+      window.clearTimeout(timeoutId);
+    }
+  };
+
+  const scheduleRetry = () => {
+    if (retryTimer) window.clearTimeout(retryTimer);
+    retryTimer = window.setTimeout(connect, 3000);
+  };
+
+  const connect = async () => {
+    if (connectActive || document.visibilityState !== "visible") return;
+    connectActive = true;
+    if (retryTimer) window.clearTimeout(retryTimer);
+    retryTimer = null;
+    retryButton.hidden = true;
+    statusElement.className = "waiting";
+    statusElement.textContent = "Macへ接続しています…";
+    try {
+      const endpointResponse = await fetchWithTimeout(
+        `./endpoint.json?t=${Date.now()}`,
+        {cache: "no-store"},
+        6000,
+      );
+      if (!endpointResponse.ok) throw new Error(`endpoint HTTP ${endpointResponse.status}`);
+      const endpoint = await endpointResponse.json();
+      const tunnelUrl = String(endpoint?.url || "").replace(/\/$/, "");
+      if (!endpointPattern.test(tunnelUrl)) throw new Error("invalid endpoint URL");
+
+      // endpoint.jsonの更新直後にDNSが未反映でも、到達確認なしで古いエラー画面へ移動しない。
+      const healthResponse = await fetchWithTimeout(
+        `${tunnelUrl}/health?t=${Date.now()}`,
+        {cache: "no-store", credentials: "omit", mode: "cors"},
+        8000,
+      );
+      if (!healthResponse.ok) throw new Error(`health HTTP ${healthResponse.status}`);
+      window.location.replace(`${tunnelUrl}/?launcher=1`);
+    } catch (_error) {
+      statusElement.className = "error";
+      statusElement.textContent = "Macの起動を待っています。自動で再接続します…";
+      retryButton.hidden = false;
+      scheduleRetry();
+    } finally {
+      connectActive = false;
+    }
+  };
+
+  retryButton.addEventListener("click", connect);
+  window.addEventListener("pageshow", connect);
+  window.addEventListener("online", connect);
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") connect();
+  });
+  connect();
+})();
 </script></body></html>
